@@ -3,26 +3,31 @@ from glob import glob
 
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from fontTools.svgLib.path.arc import TWO_PI
 
-from help import refCornerHL, refCornerLR, findHull, methods
+threshKp = 0.5
+
 
 sift = cv2.SIFT_create()
 
 debug = False
+debug = True
 cards = []
-for f in glob('./cards/*'):
+for f in glob('./cards/*')[:3]:
     img = cv2.imread(f)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     # hullHL = findHull(img, refCornerHL, debug=debug)
     # hullLR = findHull(img, refCornerLR, debug=debug)
     width = img.shape[1]
+    height = img.shape[0]
     mask = np.zeros((img.shape[0], width), dtype=np.uint8)
 
+    # Only Corner for keypoints + rounded edge excluded
     for iy, ix in np.ndindex(mask.shape):
-        if ix < 0.1 * width or ix > 0.9 * width:
-            mask[iy, ix] = 255
+        if ix < 0.2 * width or ix > 0.8 * width:
+            if iy < 0.25*height or iy > 0.75*height:
+                if ix + iy > 20 and (width-ix)+(height-iy) > 20 and ix + height-iy > 20 and width-ix+iy>20:
+                    mask[iy, ix] = 255
 
     kp, desc = sift.detectAndCompute(gray, mask)
     cards.append({"name": f, "img": img, "kp": kp, "desc": desc, "mask": mask})
@@ -32,47 +37,85 @@ for f in glob('./cards/*'):
         cv2.imshow(f + 'card', img)
         cv2.imshow(f + 'mask', mask)
 
+if debug: cv2.waitKey()
+cv2.destroyAllWindows()
+
+## exclude too similar features
+
+index_params = dict(algorithm=0, trees=5)
+search_params = dict(checks=60)
+flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+
+
+
+to_remove = {}
+for c1 in cards:
+    goodones=[]
+    for c2 in cards:
+        if c1 != c2:
+            matches = flann.knnMatch(c1['desc'], c2['desc'], k=2)
+            goodones += [m for m, n in matches if m.distance < 0.4 * n.distance]
+
+    if debug:
+        img = cv2.drawKeypoints(c1['img'], c1['kp'], img, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
+        c_name_ = c1['name']
+        cv2.imshow(c_name_, img)
+        to_remove[c_name_] = goodones
+
+if debug: cv2.waitKey()
+
 cardnames = list(map(lambda c: c['name'], cards))
 
-plt.ion()
-fig = plt.figure()
 
-cap = cv2.VideoCapture(0)
-key = None
-while key != 27:
-    _, frame = cap.read()
-    # frame = cv2.imread('./manycards2.jpg')
 
+
+
+def ransac_points(src_pts,dst_pts):
+    M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+    matchesMask = mask.ravel().tolist()
+    return M, mask
+    # h, w = img1.shape
+    # pts = np.float32([[0, 0], [0, h - 1], [w - 1, h - 1], [w - 1, 0]]).reshape(-1, 1, 2)
+    # dst = cv.perspectiveTransform(pts, M)
+    # img2 = cv.polylines(img2, [np.int32(dst)], True, 255, 3, cv.LINE_AA)
+
+
+def find_cards(frame):
+    global gray, kp, desc, img
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     kp, desc = sift.detectAndCompute(gray, None)
-
     img = cv2.drawKeypoints(gray, kp, frame, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-    cv2.imshow('keypoints', img)
     # cv2.imshow('frame', frame)
     # blur = cv2.bilateralFilter(frame, 20, 100, 500)
     # cv2.imshow('blur', blur)
-
     # plt.imshow(frame), plt.show()
-
-    bf = cv2.BFMatcher(cv2.NORM_L1, crossCheck=True)
-
-    results = []
-
+    results = {}
     for c in cards:
-        index_params = dict(algorithm=0, trees=5)
-        search_params = dict()
-        flann = cv2.FlannBasedMatcher(index_params, search_params)
+        threshold = len(c['kp']) * threshKp
         matches = flann.knnMatch(desc, c['desc'], k=2)
         # sorted(matches, key=lambda x: x.distance)
-        matches = [m for m, n in matches if m.distance < 0.5 * n.distance]
+        matches = [m for m, n in matches if m.distance < 0.8 * n.distance]
+        matchBack = [kp[m.queryIdx] for m in matches]
+        matchFrom = [c['kp'][m.trainIdx] for m in matches]
 
-        results.append(len(matches))
+        num_matches = len(matches)
+        if num_matches > threshold:
+            src_pts = np.float32([kp.pt for kp in matchBack]).reshape(-1,1,2)
+            dst_pts = np.float32([kp.pt for kp in matchFrom]).reshape(-1, 1, 2)
+            M, mask = ransac_points(src_pts,dst_pts)
+            biMask = mask > 0
+            cunt = np.count_nonzero(biMask)
+            filteredPoints = src_pts[biMask]
+            draw_boundingrect((255, 36, 12), src_pts, img)
+            draw_boundingrect((36, 255, 12), filteredPoints, img)
+            results[c['name']] = num_matches
+
+
 
         if debug:
             imgMatches = cv2.drawMatches(img, kp, c['img'], c['kp'], matches[:50], img, flags=2)
 
-            matchBack = [kp[m.queryIdx] for m in matches]
-            matchFrom = [c['kp'][m.trainIdx] for m in matches]
 
             # cv2.imshow(c['name'], imgMatches)
             backCircles = np.zeros(frame.shape, np.uint8)
@@ -97,17 +140,28 @@ while key != 27:
             # cv2.imshow(backName, backCircles)
             # cv2.imshow(fromName, fromCircles)
             cv2.imshow(backName, imgRelLines)
+    cv2.imshow('keypoints', img)
+    cv2.waitKey(1)
+    print(results)
 
-    plt.clf()
-    plt.barh(cardnames, results)
-    plt.pause(0.01)
 
-    names = []
-    for name, size in zip(cardnames, results):
-        if size > 15:
-            names.append(name)
-    if names:
-        print(names)
+def draw_boundingrect(color, filteredPoints, img):
+    x, y, w, h = cv2.boundingRect(filteredPoints)
+    cv2.rectangle(img, (x, y), (x + w, y + h), color, 4)
+
+
+# img = cv2.imread('./curve.png')
+# find_cards(img)
+# cv2.waitKey()
+# exit(0)
+
+
+cap = cv2.VideoCapture(0)
+key = None
+while key != 27:
+    _, frame = cap.read()
+
+    find_cards(frame)
 
     if debug:
         key = cv2.waitKey(1)
