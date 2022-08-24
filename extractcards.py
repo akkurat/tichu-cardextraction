@@ -7,7 +7,7 @@ cornerYmax = 25
 
 # We convert the measures from mm to pixels: multiply by an arbitrary factor 'zoom'
 # You shouldn't need to change this
-zoom = 4
+zoom = 12
 cardW *= zoom
 cardH *= zoom
 cornerXmin = int(cornerXmin * zoom)
@@ -120,7 +120,7 @@ refCornerLR = np.array([[cardW - cornerXmax, cardH - cornerYmax], [cardW - corne
                        dtype=np.float32)
 refCorners = np.array([refCornerHL, refCornerLR])
 
-bord_size = 5  # bord_size alpha=0
+bord_size = 15  # bord_size alpha=0
 alphamask = np.ones((cardH, cardW), dtype=np.uint8) * 255
 cv2.rectangle(alphamask, (0, 0), (cardW - 1, cardH - 1), 0, bord_size)
 cv2.line(alphamask, (bord_size * 3, 0), (0, bord_size * 3), 0, bord_size)
