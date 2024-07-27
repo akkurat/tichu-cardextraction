@@ -1,74 +1,64 @@
 import math
 import os
-from glob import glob
-from os.path import isfile, join
+from os.path import isfile, join, isdir
 
 import cv2
 import numpy as np
 from fontTools.svgLib.path.arc import TWO_PI
 from sklearn.cluster import DBSCAN, MeanShift
 
-threshKp = 1
+threshKp = 0.3
+RING = 8
 
-sift = cv2.SIFT_create()
+matcher = cv2.SIFT_create()
 
 debug = False
 # debug = True
-cards = []
-path = './cards/'
-for f in os.listdir(path):
-    full_path = join(path, f)
-    if not isfile(full_path) or f.startswith('.'):
+ranks = []
+opath = './classif/ranks/'
+for r in os.listdir(opath):
+    path = join(opath, r)
+    if not isdir(path):
         continue
-    img = cv2.imread(full_path)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # hullHL = findHull(img, refCornerHL, debug=debug)
-    # hullLR = findHull(img, refCornerLR, debug=debug)
-    width = img.shape[1]
-    height = img.shape[0]
-    # mask = None
-    mask = np.zeros((img.shape[0], width), dtype=np.uint8)
+    kp = ()
+    fp = ()
+    desc = None
+    for f in os.listdir(path):
+        full_path = join(path, f)
+        if not isfile(full_path) or f.startswith('.'):
+            continue
+        img = cv2.imread(full_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # hullHL = findHull(img, refCornerHL, debug=debug)
+        # hullLR = findHull(img, refCornerLR, debug=debug)
+        width = img.shape[1]
+        height = img.shape[0]
 
-    # Only Corner for keypoints + rounded edge excluded
-    for iy, ix in np.ndindex(mask.shape):
-        if ix < 0.19 * width and iy < 0.3 * height or ix > 0.81 * width and iy > 0.7 * height:
-            if ix + iy > 20 and (width - ix) + (height - iy) > 20 and ix + height - iy > 20 and width - ix + iy > 20:
-                mask[iy, ix] = 255
+        # _fp = fast.detect(gray, None)
+        _kp, _desc = matcher.detectAndCompute(gray, None)
+        kp += _kp
+        if desc is not None:
+            if _desc is not None:
+                desc = np.concatenate((desc, _desc))
+        else:
+            desc = _desc
 
-    kp, desc = sift.detectAndCompute(gray, mask)
-    cards.append({"name": f, "img": img, "kp": kp, "desc": desc, "mask": mask})
+    ranks.append({"name": r, "img": img, "kp": kp, "desc": desc})
 
     if debug:
         img = cv2.drawKeypoints(gray, kp, img, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-        cv2.imshow(f + 'card', img)
-        cv2.imshow(f + 'mask', mask)
+        cv2.imshow(r + 'card', img)
 
 if debug: cv2.waitKey()
 cv2.destroyAllWindows()
 
 ## exclude too similar features
 
+search_params = dict(checks=100)
 index_params = dict(algorithm=0, trees=5)
-search_params = dict(checks=60)
 flann = cv2.FlannBasedMatcher(index_params, search_params)
 
-to_remove = {}
-for c1 in cards:
-    goodones = []
-    for c2 in cards:
-        if c1 != c2:
-            matches = flann.knnMatch(c1['desc'], c2['desc'], k=2)
-            goodones += [m for m, n in matches if m.distance < 0.4 * n.distance]
-
-    if debug:
-        img = cv2.drawKeypoints(c1['img'], c1['kp'], img, flags=cv2.DRAW_MATCHES_FLAGS_DRAW_RICH_KEYPOINTS)
-        c_name_ = c1['name']
-        cv2.imshow(c_name_, img)
-        to_remove[c_name_] = goodones
-
-if debug: cv2.waitKey()
-
-cardnames = list(map(lambda c: c['name'], cards))
+cardnames = list(map(lambda c: c['name'], ranks))
 
 
 def ransac_points(src_pts, dst_pts):
@@ -84,7 +74,7 @@ def ransac_points(src_pts, dst_pts):
 class CardDetector:
 
     def __init__(self):
-        self.meanshift = MeanShift(cluster_all=False, bandwidth=50)
+        self.meanshift = MeanShift(cluster_all=False, bandwidth=75)
         self.moving = []
         self.i = 0
 
@@ -99,23 +89,21 @@ class CardDetector:
         gb = int(width / 20)
         if gb % 2 == 0:
             gb += 1
-
         kernel = np.ones((gb // 2 + 1, gb // 2 + 1), np.uint8)
         thresh = cv2.GaussianBlur(gray, (gb, gb), 0)
         thresh = cv2.dilate(thresh, kernel, iterations=2)
         T, thresh = cv2.threshold(thresh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-
-        if (len(self.moving) < 4):
-            self.moving.append(  sift.detectAndCompute(gray, thresh) )
+        descriptors = matcher.detectAndCompute(gray, thresh)
+        if (len(self.moving) < RING):
+            self.moving.append(descriptors)
         else:
-            self.moving[self.i] = sift.detectAndCompute(gray, thresh)
+            self.moving[self.i] = descriptors
 
-        self.i = (self.i + 1) % 4
+        self.i = (self.i + 1) % RING
 
         # ret, thresh = cv2.threshold(thresh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         cv2.imshow('thresh', thresh)
-
 
         kp = ()
         desc = None
@@ -130,15 +118,17 @@ class CardDetector:
         # cv2.imshow('blur', blur)
         # plt.imshow(frame), plt.show()
         results = {}
-        for c in cards:
+        for c in ranks:
             threshold = len(c['kp']) * threshKp
             _matches = flann.knnMatch(desc, c['desc'], k=2)
             # sorted(matches, key=lambda x: x.distance)
-            matches = [m for m, n in _matches if m.distance < 0.95 * n.distance]
+            # _matches = filter(lambda t: len(t) > 1, _matches)
+            matches = [m for m, n in _matches if m.distance < 0.8 * n.distance]
             matchBack = [kp[m.queryIdx] for m in matches]
             matchFrom = [c['kp'][m.trainIdx] for m in matches]
 
             num_matches = len(matches)
+            print( num_matches, threshold )
             if num_matches > threshold:
 
                 results[c['name']] = ''
@@ -147,7 +137,7 @@ class CardDetector:
                 dst_pts = np.float32([kp.pt for kp in matchFrom]).reshape(-1, 1, 2)
                 pts = np.float32([kp.pt for kp in matchBack])
                 cluster = self.meanshift.fit(pts)
-                print(cluster.cluster_centers_)
+                # print(cluster.cluster_centers_)
                 for i, center in enumerate(cluster.cluster_centers_):
                     int_center = center.astype(int)
                     color = ((i % 3) * 200, ((i + 1) % 3) * 200, ((i + 2) % 3) * 200)
@@ -214,7 +204,6 @@ cm = CardDetector()
 cm.find_cards(img)
 cv2.waitKey()
 exit(0)
-
 
 cap = cv2.VideoCapture(0)
 key = None
